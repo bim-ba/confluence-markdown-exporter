@@ -50,7 +50,7 @@ _CONFIG_KEYS_EPILOG = (
     "| `export.convert_status_badges` | Convert Confluence status badges to `<mark>` elements |\n\n"
     "| `export.convert_text_highlights` | Convert background-color spans to `<mark>` elements |\n\n"
     "| `export.convert_font_colors` | Convert font-color spans to `<font>` elements |\n\n"
-    "| `export.filename_length` | Maximum filename length (default: 255) |\n\n"
+    "| `export.filename_length` | Maximum path segment length in UTF-8 bytes (default: 255) |\n\n"
     "| `connection_config.max_workers` | Parallel export workers (default: 20) |\n\n"
     "| `connection_config.use_v2_api` | Use Confluence REST API v2 (`true`/`false`) |\n\n"
     "| `connection_config.verify_ssl` | Verify SSL certificates (`true`/`false`) |\n\n"
