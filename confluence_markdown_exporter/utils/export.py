@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -64,11 +65,76 @@ def save_file(file_path: Path, content: str | bytes) -> None:
     logger.debug("Saved file %s (%d bytes)", file_path, len(content))
 
 
+# A truncated name keeps a marker plus this many hex characters of a digest of the FULL name,
+# so two titles differing only after the cut still land on distinct paths.
+TRUNCATION_MARKER = "~"
+TRUNCATION_DIGEST_CHARS = 8
+# `%2D` and friends come from `export.filename_encoding`; cutting inside one leaves a dangling
+# `%` or `%2` that no longer decodes.
+DANGLING_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]?$")
+# A UTF-8 continuation byte matches 0b10xxxxxx, i.e. `byte & 0xC0 == 0x80`.
+UTF8_CONTINUATION_MASK = 0xC0
+UTF8_CONTINUATION_PREFIX = 0x80
+# A trailing dot-group longer than this is page-title text, not a file extension.
+MAX_EXTENSION_BYTES = 16
+
+
+def _cut_to_bytes(name: str, max_bytes: int) -> str:
+    """Return the longest prefix of `name` whose UTF-8 encoding fits `max_bytes`.
+
+    Examples:
+        _cut_to_bytes("abc", 2) -> "ab"
+        _cut_to_bytes("\u0430\u0431", 3) -> "\u0430"
+    """
+    encoded = name.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return name
+    # Walk back off any continuation byte to the start of the straddled character.
+    cut = max_bytes
+    while cut > 0 and (encoded[cut] & UTF8_CONTINUATION_MASK) == UTF8_CONTINUATION_PREFIX:
+        cut -= 1
+    return encoded[:cut].decode("utf-8")
+
+
+def truncate_to_bytes(name: str, max_bytes: int) -> str:
+    """Shorten one path segment so its UTF-8 encoding fits `max_bytes`.
+
+    Linux caps a path segment at 255 BYTES, so a character count is the wrong ruler for a
+    non-ASCII title: 255 Cyrillic characters are 510 bytes and the file cannot be created at
+    all. macOS APFS and NTFS cap at 255 CHARACTERS, which is why such names survive locally
+    and fail only on Linux -- inside `actions/checkout`, for one.
+
+    A name that already fits comes back unchanged, byte for byte. A name that does not is cut
+    on a character boundary, never inside a percent-escape, and gets `~<8 hex>` of a digest of
+    the full name appended.
+
+    Examples:
+        truncate_to_bytes("report.md", 255) -> "report.md"
+        truncate_to_bytes("\u0430" * 200, 255) -> 246 bytes of "\u0430" plus "~<8 hex>"
+    """
+    if len(name.encode("utf-8")) <= max_bytes:
+        return name
+
+    digest = hashlib.blake2b(
+        name.encode("utf-8"), digest_size=TRUNCATION_DIGEST_CHARS // 2
+    ).hexdigest()
+    suffix = f"{TRUNCATION_MARKER}{digest}"
+    budget = max_bytes - len(suffix)
+    if budget < 1:
+        # No room for the marker: fall back to a plain byte cut on a character boundary.
+        return _cut_to_bytes(name, max_bytes)
+
+    head = DANGLING_PERCENT_ESCAPE.sub("", _cut_to_bytes(name, budget)).rstrip(" .")
+    return f"{head}{suffix}"
+
+
 def sanitize_filename(filename: str) -> str:
     """Sanitize a filename for cross-platform compatibility.
 
-    Replaces characters based on encoding mapping,
-    trims trailing spaces and dots, and prevents reserved names.
+    Replaces characters based on encoding mapping, trims trailing spaces and dots, and
+    prevents reserved names. Length is NOT capped here: the caller substitutes this into a
+    path template that may append an extension, so the cap belongs to the rendered segment
+    and is applied by `cap_path_segments`.
 
     Args:
         filename: The original filename.
@@ -116,8 +182,41 @@ def sanitize_filename(filename: str) -> str:
     if export_options.filename_lowercase:
         sanitized = sanitized.lower()
 
-    # Limit length to specificed number of characters
-    return sanitized[: export_options.filename_length]
+    return sanitized
+
+
+def cap_path_segment(segment: str, max_bytes: int) -> str:
+    """Cap one rendered path segment at `max_bytes`, keeping its file extension.
+
+    The extension is what makes this different from `truncate_to_bytes`: a page path template
+    ends in `.md`, and a Markdown mirror whose long pages lost their extension is not a
+    Markdown mirror. A trailing dot-group counts as an extension only when it is short and
+    alphanumeric, so a title ending in `... воспроизведения.)` is not mistaken for one.
+
+    Examples:
+        cap_path_segment("note.md", 255) -> "note.md"
+        cap_path_segment("\u0430" * 200 + ".md", 255) -> 243 bytes of "\u0430" plus "~<8 hex>.md"
+    """
+    if len(segment.encode("utf-8")) <= max_bytes:
+        return segment
+
+    stem, dot, extension = segment.rpartition(".")
+    extension_bytes = len(f"{dot}{extension}".encode())
+    if not stem or not dot or not extension.isalnum() or extension_bytes > MAX_EXTENSION_BYTES:
+        return truncate_to_bytes(segment, max_bytes)
+    return f"{truncate_to_bytes(stem, max_bytes - extension_bytes)}{dot}{extension}"
+
+
+def cap_path_segments(path: Path) -> Path:
+    """Cap every segment of an already-rendered export path at `export.filename_length` bytes.
+
+    Applied once, to the FINAL path, so each segment's digest is taken over that segment's
+    whole name. Capping the title instead would hash a name the cap had already cut, and two
+    pages differing only past the cut would collide on one file.
+    """
+    return Path(
+        *(cap_path_segment(part, export_options.filename_length) for part in path.parts)
+    )
 
 
 def sanitize_key(s: str, connector: str = "_") -> str:

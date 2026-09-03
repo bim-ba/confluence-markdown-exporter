@@ -56,6 +56,7 @@ from confluence_markdown_exporter.api_clients import parse_gateway_url
 from confluence_markdown_exporter.utils.app_data_store import get_settings
 from confluence_markdown_exporter.utils.app_data_store import normalize_instance_url
 from confluence_markdown_exporter.utils.drawio_converter import load_and_parse_drawio
+from confluence_markdown_exporter.utils.export import cap_path_segments
 from confluence_markdown_exporter.utils.export import github_heading_slug
 from confluence_markdown_exporter.utils.export import sanitize_filename
 from confluence_markdown_exporter.utils.export import sanitize_key
@@ -709,7 +710,7 @@ class Attachment(Document):
     @property
     def export_path(self) -> Path:
         filepath_template = Template(settings.export.attachment_path.replace("{", "${"))
-        return Path(filepath_template.safe_substitute(self._template_vars))
+        return cap_path_segments(Path(filepath_template.safe_substitute(self._template_vars)))
 
     @classmethod
     def from_json(cls, data: JsonResponse, base_url: str) -> "Attachment":
@@ -829,7 +830,7 @@ class Descendant(Document):
     @property
     def export_path(self) -> Path:
         filepath_template = Template(settings.export.page_path.replace("{", "${"))
-        return Path(filepath_template.safe_substitute(self._template_vars))
+        return cap_path_segments(Path(filepath_template.safe_substitute(self._template_vars)))
 
     @classmethod
     def from_json(cls, data: JsonResponse, base_url: str) -> "Descendant":
@@ -937,7 +938,7 @@ class Page(Document):
     @property
     def export_path(self) -> Path:
         filepath_template = Template(settings.export.page_path.replace("{", "${"))
-        return Path(filepath_template.safe_substitute(self._template_vars))
+        return cap_path_segments(Path(filepath_template.safe_substitute(self._template_vars)))
 
     @property
     def html(self) -> str:

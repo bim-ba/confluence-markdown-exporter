@@ -197,7 +197,14 @@ Character mapping for filename encoding.
 
 ### export.filename_length
 
-Maximum length of filenames.
+Maximum length of each exported path segment, counted in UTF-8 bytes.
+
+Linux caps a path segment at 255 bytes, and a non-ASCII title reaches that at far fewer
+characters -- 255 Cyrillic characters are 510 bytes and the file cannot be created at all.
+macOS and Windows cap at 255 characters instead, so such names survive there and fail only on
+Linux. A segment over the cap is cut on a character boundary, never inside a percent-escape
+produced by `export.filename_encoding`, and gets `~<8 hex>` of a digest of the full name
+appended so that two titles differing only after the cut keep distinct paths.
 
 - Default: `255`
 - ENV Var: `CME_EXPORT__FILENAME_LENGTH`

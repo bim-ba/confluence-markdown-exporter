@@ -1,5 +1,6 @@
 """Unit tests for export module."""
 
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -7,12 +8,15 @@ from unittest.mock import patch
 
 import pytest
 
+from confluence_markdown_exporter.utils.export import cap_path_segment
+from confluence_markdown_exporter.utils.export import cap_path_segments
 from confluence_markdown_exporter.utils.export import escape_character_class
 from confluence_markdown_exporter.utils.export import github_heading_slug
 from confluence_markdown_exporter.utils.export import parse_encode_setting
 from confluence_markdown_exporter.utils.export import sanitize_filename
 from confluence_markdown_exporter.utils.export import sanitize_key
 from confluence_markdown_exporter.utils.export import save_file
+from confluence_markdown_exporter.utils.export import truncate_to_bytes
 
 
 class TestParseEncodeSetting:
@@ -180,17 +184,6 @@ class TestSanitizeFilename:
             assert result == f"{name.lower()}_"
 
     @patch("confluence_markdown_exporter.utils.export.export_options")
-    def test_filename_length_limit(self, mock_export_options: MagicMock) -> None:
-        """Test that filename length is limited."""
-        mock_export_options.filename_encoding = ""
-        mock_export_options.filename_length = 10
-
-        long_filename = "very_long_filename_that_exceeds_limit"
-        result = sanitize_filename(long_filename)
-        assert len(result) == 10
-        assert result == long_filename[:10]
-
-    @patch("confluence_markdown_exporter.utils.export.export_options")
     def test_complex_filename_sanitization(self, mock_export_options: MagicMock) -> None:
         """Test complex filename sanitization with multiple rules."""
         mock_export_options.filename_encoding = '" ":"_","?":"_",":":"_"'
@@ -219,6 +212,114 @@ class TestSanitizeFilename:
 
         result = sanitize_filename("test\x00\x08\x1fname")
         assert result == "testname"
+
+
+class TestTruncateToBytes:
+    """Test cases for truncate_to_bytes function."""
+
+    def test_short_name_unchanged(self) -> None:
+        """A name inside the cap is returned identical."""
+        assert truncate_to_bytes("report.md", 255) == "report.md"
+
+    def test_name_exactly_at_the_cap_unchanged(self) -> None:
+        """The cap is inclusive, so a name of exactly max_bytes is not touched."""
+        name = "a" * 255
+        assert truncate_to_bytes(name, 255) == name
+
+    def test_cut_lands_on_a_character_boundary(self) -> None:
+        """A multi-byte character is never split in half."""
+        result = truncate_to_bytes("б" * 200, 255)  # noqa: RUF001 -- Cyrillic is the point
+        assert len(result.encode("utf-8")) <= 255
+        assert result.encode("utf-8").decode("utf-8") == result
+
+    def test_never_cuts_inside_a_percent_escape(self) -> None:
+        """A dangling `%` or `%2` left by the cut is dropped rather than kept."""
+        # 84 escapes of 3 bytes each = 252 bytes; the 82nd lands across the 246-byte budget.
+        result = truncate_to_bytes("%2D" * 84, 255)
+        head = result[:-9]
+        assert not head.endswith("%")
+        assert not re.search(r"%[0-9A-Fa-f]$", head)
+        assert len(result.encode("utf-8")) <= 255
+
+    def test_distinct_inputs_stay_distinct(self) -> None:
+        """The digest suffix comes from the full name, so a shared prefix is not a collision."""
+        shared = "ц" * 300
+        assert truncate_to_bytes(f"{shared}1", 255) != truncate_to_bytes(f"{shared}2", 255)
+
+    def test_cap_too_small_for_the_suffix(self) -> None:
+        """Below the suffix width there is no room for a digest; the cut still holds."""
+        result = truncate_to_bytes("ю" * 50, 8)
+        assert len(result.encode("utf-8")) <= 8
+        assert "~" not in result
+
+
+class TestCapPathSegment:
+    """Test cases for cap_path_segment -- the byte cap on ONE rendered path segment."""
+
+    def test_segment_under_the_cap_is_untouched(self) -> None:
+        """A name that already fits comes back byte for byte."""
+        name = "Quarterly Report 2026-Q1.md"
+        assert cap_path_segment(name, 255) == name
+
+    def test_cyrillic_page_name_fits_the_byte_cap(self) -> None:
+        """A 300-character Cyrillic title plus `.md` must fit 255 BYTES, not 255 characters."""
+        segment = "Отчёт о нагрузке " * 18 + ".md"  # noqa: RUF001 -- Cyrillic is the point
+        assert len(segment) > 300
+
+        result = cap_path_segment(segment, 255)
+
+        assert len(result.encode("utf-8")) <= 255
+        assert result.endswith(".md")
+
+    def test_names_differing_after_the_cut_stay_distinct(self) -> None:
+        """Two long names sharing a prefix must not collapse onto one file."""
+        shared = "Требования к витрине " * 15
+        first = cap_path_segment(f"{shared} вариант А.md", 255)  # noqa: RUF001
+        second = cap_path_segment(f"{shared} вариант Б.md", 255)
+
+        assert first != second
+        assert first.endswith(".md")
+        assert second.endswith(".md")
+        assert max(len(first.encode("utf-8")), len(second.encode("utf-8"))) <= 255
+
+    def test_title_punctuation_is_not_taken_for_an_extension(self) -> None:
+        """A trailing `.)` is page-title punctuation, so nothing is preserved as an extension."""
+        segment = "Итерация 2 - Реализовать_ громкость озвучки, тон речи." * 6 + ".)"
+        result = cap_path_segment(segment, 255)
+
+        assert len(result.encode("utf-8")) <= 255
+        assert not result.endswith(".)")
+
+    def test_extensionless_segment_falls_back_to_the_plain_rule(self) -> None:
+        """A directory segment has no extension and is cut by truncate_to_bytes."""
+        segment = "ц" * 300
+        assert cap_path_segment(segment, 255) == truncate_to_bytes(segment, 255)
+
+
+class TestCapPathSegments:
+    """Test cases for cap_path_segments -- the cap applied across a whole rendered path."""
+
+    @patch("confluence_markdown_exporter.utils.export.export_options")
+    def test_every_segment_is_capped_independently(self, mock_export_options: MagicMock) -> None:
+        """Directory segments are capped by the same rule as the file name."""
+        mock_export_options.filename_length = 255
+        long_directory = "д" * 200
+        path = Path(long_directory) / f"{'я' * 200}.md"
+
+        result = cap_path_segments(path)
+
+        assert [len(part.encode("utf-8")) <= 255 for part in result.parts] == [True, True]
+        assert result.name.endswith(".md")
+
+    @patch("confluence_markdown_exporter.utils.export.export_options")
+    def test_a_path_already_inside_the_cap_is_unchanged(
+        self, mock_export_options: MagicMock
+    ) -> None:
+        """An ASCII export keeps exactly the paths it had before."""
+        mock_export_options.filename_length = 255
+        path = Path("Space Name") / "Homepage" / "Ancestor" / "Page Title.md"
+
+        assert cap_path_segments(path) == path
 
 
 class TestSanitizeKey:

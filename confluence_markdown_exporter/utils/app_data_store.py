@@ -564,7 +564,11 @@ class ExportConfig(BaseModel):
     filename_length: int = Field(
         default=255,
         title="Filename Length",
-        description="Maximum length of the filename.",
+        description=(
+            "Maximum length of each path segment, in UTF-8 bytes. Linux caps a segment at "
+            "255 bytes, which a non-ASCII title reaches at far fewer characters. A segment "
+            "over the cap is cut on a character boundary and given a short digest suffix."
+        ),
     )
     filename_lowercase: bool = Field(
         default=False,
